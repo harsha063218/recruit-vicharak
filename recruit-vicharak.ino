@@ -1,0 +1,161 @@
+/*
+PROJECT: High-speed File Download to SFIFFS on ESP32
+Author:  K Harshavardhan
+Objective: Download a file via HTTPS and save it to SPIFFS while showing download progress and speed. 
+*/
+
+// ------------Header Files--------------
+
+#include<WiFi.h> // wifi library for connecting ESP32 to wifi
+#include<HTTPClient.h>//HTTP Client library to handle HTTP/HTTPS requests
+#include<WiFiClientSecure.h>//WIFIclientsecure to handle HTTPS connections 
+#include<FS.h>
+#include<SPIFFS.h>//SPIFFS library for filesystem on ESP32 flash.
+
+//----------User Configurations-----------------
+
+const char* ssid ="Airtel_Sri Srinivasa pg 1st flr";// Wifi Credentials(high speed connection is better choice for desired output ) for user configuration 
+const char* password ="AVR994529";
+
+String urlLists[]={
+  "https://speed.hetzner.de/10MB.bin",  // Large test file
+ "https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json", // Smaller test file
+ "https://www.example.com/index.html", // Generic fallback
+  "https://speed.hetzner.de/100MB.bin" // Large test file
+
+};
+const int urlCount=sizeof(urlLists)/sizeof(urlLists[0]);
+
+const char* spiffsPath ="/download.bin";
+
+#define BufferSize 16384 //16 KB buffer
+
+//------SetUp Function------------
+
+void setup()
+{
+  Serial.begin(115200);
+  delay(1000);
+ // connect to wifi
+  WiFi.mode(WIFI_STA);//station mode
+  WiFi.begin(ssid,password);
+  Serial.print("Connecting WiFi");
+  while(WiFi.status()!=WL_CONNECTED)
+  {
+    delay(500);
+    Serial.print(".");
+  }
+    Serial.println("\nWiFi Connected! IP:"+ WiFi.localIP().toString());
+    if(!SPIFFS.begin(true))  //Initialze SPIFFS
+    {
+      Serial.println("SPIFFS mount failed!");
+      while(1);//stop execution
+    }
+    //Try downloading from Urls in oreder
+    bool success =false;
+    for(int i=0;i<urlCount;i++)
+    {
+      Serial.println("Trying URL: "+urlLists[i]);
+      if(downloadToSPIFFS(urlLists[i],spiffsPath)){
+      success=true;//if download succeds , stop trying other urls
+      break;
+      }
+    }
+  if(!success)
+  {
+    Serial.println("All download attempts failed.");
+  }
+}
+
+// ---------------Loop Function-------------
+void loop(){}// nothing here, as we only download once in setup
+
+bool downloadToSPIFFS(String url,const char* destPath)// Downloads a file from the given url and save it to SPIFFS and returns true if download succeded.
+{
+  HTTPClient https; // setup HTTPS client
+  WiFiClientSecure* client=new WiFiClientSecure;
+  client->setInsecure();
+  Serial.println("Connecting to "+url);
+  if(!https.begin(*client,url))
+  {
+    Serial.println("HTTPS connection failed!");
+    return false;
+  }
+  // Add headers to prevent server reject connection
+  https.addHeader("User-Agent","ESP32-Downloader");
+  https.addHeader("Accept-Encoding","Identity");
+ // send HTTP GET Request
+  int httpCode=https.GET();
+  if(httpCode!=HTTP_CODE_OK)
+  {
+    Serial.printf("HTTP GET failed,code=%d\n",httpCode);
+    https.end();
+    return false;
+  }
+  int totalLen= https.getSize();
+  Serial.printf("Content-Length: %d bytes\n",totalLen);
+
+  //Open file on SPIFFS for writting
+
+  File fp= SPIFFS.open(destPath,FILE_WRITE);
+  if(!fp)
+  {
+    Serial.println("SPIFFS open failed!");
+    https.end();
+    return false;
+  }
+  
+  //Allocate RAM buffer for high speed Writes
+
+  uint8_t *buffer=(uint8_t*)malloc(BufferSize);
+  if(!buffer)
+  {
+    Serial.println("Buffer Allocation Failed!");
+    fp.close();
+    https.end();
+    return false;
+  }
+//start reading and writing in chunks
+  int bytes=0;
+  unsigned long t0=millis();
+  WiFiClient* stream=https.getStreamPtr();
+  Serial.println("Downloading....");
+  while(https.connected()&&(totalLen>0||totalLen==-1))
+  {
+    size_t len= stream->available();
+    if(len)
+    {
+      if(len>BufferSize)
+      len=BufferSize;
+      int c=stream->readBytes((char*)buffer,len);
+      if(c<=0)
+      {
+        break;
+      }
+      fp.write(buffer,c);//write chunk to SPIFFS
+      bytes+=c;//update total bytes written
+      if(totalLen>0)
+      totalLen-=c;
+// live speed display
+    float secElapsed=(millis()-t0)/1000.0;
+    float kbps=(bytes/1024.0)/secElapsed;
+    Serial.printf("\rDownloade: %d bytes\n Speed : %1fKB/s",bytes,kbps);
+    }
+    yield();// allow background tasks to run
+  }
+  free(buffer);
+  fp.close();
+  https.end();
+
+  unsigned long t1=millis();
+  float sec=(t1-t0)/1000.0;
+  float kbps=(bytes/1024.0)/sec;
+  Serial.printf("\nDownload Complete!\nBytes : %d\nTime: %2fs\nAvg Speed: %1fKB/s",bytes,sec,kbps);
+//verify file on SPIFFS
+  File verify = SPIFFS.open(destPath,FILE_READ);
+  Serial.printf("SPIFFS file size: %dbytes\n",verify.size());
+  verify.close();
+  return (bytes>0);
+}
+
+// Thank you i will submit this code in my github repository with well structured and proper documentation.
